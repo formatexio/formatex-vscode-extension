@@ -48,3 +48,4 @@ Compiled PDFs are saved in `.formatex/output`.
 ![Compile from Context Menu](media/screenshots/context-menu.png)
 
 ![First Compile Without API Key](media/screenshots/first-compile-missing-apikey.png)
+
