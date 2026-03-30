@@ -73,7 +73,7 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Publish current version to Marketplace
+      - name: Publish patch to Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx @vscode/vsce publish -p "$VSCE_PAT"
+        run: npx @vscode/vsce publish patch -p "$VSCE_PAT"
