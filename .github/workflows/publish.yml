@@ -33,6 +33,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Publish patch to Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
@@ -62,6 +67,11 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Publish current version to Marketplace
         env:
