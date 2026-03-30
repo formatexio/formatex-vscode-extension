@@ -1,0 +1,205 @@
+{
+  "name": "formatex",
+  "displayName": "FormaTeX",
+  "description": "Compile LaTeX with FormaTeX directly from VS Code.",
+  "icon": "media/icon.png",
+  "version": "0.1.0",
+  "publisher": "formatex-io",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.110.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "latex",
+    "pdf",
+    "formatex",
+    "tex",
+    "compile"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:latex"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "formatex.setApiKey",
+        "title": "FormaTeX: Set API Key",
+        "category": "FormaTeX"
+      },
+      {
+        "command": "formatex.clearApiKey",
+        "title": "FormaTeX: Clear API Key",
+        "category": "FormaTeX"
+      },
+      {
+        "command": "formatex.compileCurrent",
+        "title": "FormaTeX: Compile Current Document",
+        "category": "FormaTeX"
+      },
+      {
+        "command": "formatex.compileResource",
+        "title": "FormaTeX: Compile Selected File",
+        "category": "FormaTeX"
+      },
+      {
+        "command": "formatex.compileProject",
+        "title": "FormaTeX: Compile Project",
+        "category": "FormaTeX"
+      },
+      {
+        "command": "formatex.checkSyntax",
+        "title": "FormaTeX: Check Syntax",
+        "category": "FormaTeX"
+      },
+      {
+        "command": "formatex.openLastPdf",
+        "title": "FormaTeX: Open Last PDF",
+        "category": "FormaTeX"
+      },
+      {
+        "command": "formatex.showOutput",
+        "title": "FormaTeX: Show Compile Output",
+        "category": "FormaTeX"
+      },
+      {
+        "command": "formatex.showUsage",
+        "title": "FormaTeX: Show Usage",
+        "category": "FormaTeX"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "formatex.compileCurrent",
+          "when": "editorLangId == latex || resourceExtname == .tex",
+          "group": "navigation@20"
+        },
+        {
+          "command": "formatex.checkSyntax",
+          "when": "editorLangId == latex || resourceExtname == .tex",
+          "group": "navigation@21"
+        },
+        {
+          "command": "formatex.compileProject",
+          "when": "editorLangId == latex || resourceExtname == .tex",
+          "group": "navigation@22"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "formatex.compileResource",
+          "when": "resourceExtname == .tex",
+          "group": "navigation@20"
+        },
+        {
+          "command": "formatex.compileProject",
+          "when": "resourceExtname == .tex",
+          "group": "navigation@21"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "formatex.compileCurrent",
+          "when": "resourceExtname == .tex",
+          "group": "navigation@20"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "FormaTeX",
+      "properties": {
+        "formatex.apiBaseUrl": {
+          "type": "string",
+          "default": "https://api.formatex.io",
+          "description": "Base URL for FormaTeX API."
+        },
+        "formatex.defaultEngine": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "pdflatex",
+            "xelatex",
+            "lualatex"
+          ],
+          "default": "auto",
+          "description": "Default engine when compiling."
+        },
+        "formatex.outputDir": {
+          "type": "string",
+          "default": ".formatex/output",
+          "description": "Relative output directory where compiled PDFs are saved."
+        },
+        "formatex.mainFile": {
+          "type": "string",
+          "default": "",
+          "description": "Optional relative path to project main .tex file."
+        },
+        "formatex.autoOpenPdf": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open local PDF after successful compile."
+        },
+        "formatex.openRemoteResult": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open remote result URL when available."
+        },
+        "formatex.enableAsyncFallback": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically fallback to async compile for large payloads."
+        },
+        "formatex.asyncFallbackBytes": {
+          "type": "number",
+          "default": 2097152,
+          "description": "Payload byte threshold that triggers async fallback."
+        },
+        "formatex.requestTimeoutMs": {
+          "type": "number",
+          "default": 90000,
+          "description": "Network request timeout in milliseconds."
+        },
+        "formatex.pollIntervalMs": {
+          "type": "number",
+          "default": 1000,
+          "description": "Polling interval for async jobs in milliseconds."
+        },
+        "formatex.pollTimeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "description": "Timeout for async job polling in milliseconds."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext .ts",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run compile",
+    "test": "npm run compile"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mezazo/formatex-vscode-extension"
+  },
+  "bugs": {
+    "url": "https://github.com/mezazo/formatex-vscode-extension/issues"
+  },
+  "homepage": "https://github.com/mezazo/formatex-vscode-extension#readme",
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@types/vscode": "^1.110.0",
+    "@typescript-eslint/eslint-plugin": "^8.58.0",
+    "@typescript-eslint/parser": "^8.58.0",
+    "@vscode/vsce": "^3.6.2",
+    "eslint": "^9.39.4",
+    "typescript": "^6.0.2"
+  }
+}
