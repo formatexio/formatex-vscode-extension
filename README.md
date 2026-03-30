@@ -48,27 +48,3 @@ Compiled PDFs are saved in `.formatex/output`.
 ![Compile from Context Menu](media/screenshots/context-menu.png)
 
 ![First Compile Without API Key](media/screenshots/first-compile-missing-apikey.png)
-
-## Development
-
-```bash
-npm install
-npm run compile
-```
-
-Press `F5` in VS Code to run the Extension Development Host.
-
-## Packaging
-
-```bash
-npm run package
-```
-
-This generates a `.vsix` artifact.
-
-## Publishing
-
-```bash
-npx @vscode/vsce login formatex-io
-npx @vscode/vsce publish
-```
