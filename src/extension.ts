@@ -2,43 +2,197 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import * as vscode from "vscode";
 import { FormatexApiClient, FormatexApiError } from "./api";
+import { clearCachedUser, getCachedUser } from "./auth";
 import { publishDiagnostics } from "./diagnostics";
+import {
+  compileCloudProject,
+  deleteFile,
+  openFile,
+  openProject,
+  openProjectInBrowser,
+  openProjectLocally,
+  refreshProjectFiles,
+  renameFile,
+  showProjectActions,
+  type ProjectLike
+} from "./commands/cloud";
 import { collectProjectFiles, getWorkspaceFolderForUri, resolveMainTex } from "./project";
+import { FormatexProjectsTree } from "./projects-tree";
 import { getSettings } from "./settings";
+import { FormatexStatusBar } from "./status-bar";
+import { FormatexFileSystemProvider } from "./vfs-provider";
+import { FormatexUriHandler } from "./uri-handler";
 import { CompileRequest, CompileResponse, DiagnosticPayload, Engine, FormatexHeaders } from "./types";
 
-const SECRET_API_KEY = "formatex.apiKey";
 const LAST_PDF_PATH_KEY = "formatex.lastPdfPath";
 const LAST_REMOTE_URL_KEY = "formatex.lastRemoteUrl";
 
 let outputChannel: vscode.OutputChannel;
 let diagnostics: vscode.DiagnosticCollection;
-let statusBarItem: vscode.StatusBarItem;
+let statusBar: FormatexStatusBar;
+let apiClient: FormatexApiClient;
+let projectsTree: FormatexProjectsTree;
+let vfsProvider: FormatexFileSystemProvider;
+const CLOUD_AUTOSAVE_DELAY_MS = 1200;
+const CLOUD_SAVED_STATE_MS = 1400;
 
 export function activate(context: vscode.ExtensionContext): void {
   outputChannel = vscode.window.createOutputChannel("FormaTeX");
   diagnostics = vscode.languages.createDiagnosticCollection("formatex");
-  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  statusBarItem.command = "formatex.showOutput";
-  statusBarItem.text = "FormaTeX: Ready";
-  statusBarItem.show();
+  statusBar = new FormatexStatusBar(context);
+  apiClient = new FormatexApiClient(getSettings());
+  projectsTree = new FormatexProjectsTree(context, apiClient);
+  vfsProvider = new FormatexFileSystemProvider(context, apiClient, (projectId) => projectsTree.refresh(projectId));
 
-  context.subscriptions.push(outputChannel, diagnostics, statusBarItem);
+  context.subscriptions.push(outputChannel, diagnostics);
+  context.subscriptions.push(vscode.workspace.registerFileSystemProvider("formatex", vfsProvider, { isCaseSensitive: true }));
+  context.subscriptions.push(vscode.window.registerTreeDataProvider("formatex-projects-view", projectsTree));
+  context.subscriptions.push(vscode.window.registerUriHandler(new FormatexUriHandler(async (projectId, filePath, mode) => {
+    await openProject(context, apiClient, statusBar, projectId, filePath, mode);
+  })));
+  context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor((editor) => {
+    if (editor?.document.uri.scheme === "formatex") {
+      vfsProvider.trackProject(editor.document.uri.authority);
+    }
+    void refreshStatusBar(context, editor?.document.uri);
+  }));
 
-  register(context, "formatex.setApiKey", async () => setApiKey(context));
-  register(context, "formatex.clearApiKey", async () => clearApiKey(context));
+  const pendingCloudAutosaves = new Map<string, NodeJS.Timeout>();
+  let cloudSavedStateTimer: NodeJS.Timeout | undefined;
+  context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => {
+    if (event.document.uri.scheme !== "formatex") {
+      return;
+    }
+
+    if (event.contentChanges.length === 0) {
+      return;
+    }
+
+    const settings = getSettings();
+    if (!settings.autoSyncOnSave) {
+      return;
+    }
+
+    vfsProvider.trackProject(event.document.uri.authority);
+
+    const documentKey = event.document.uri.toString();
+    const existing = pendingCloudAutosaves.get(documentKey);
+    if (existing) {
+      clearTimeout(existing);
+    }
+
+    const timer = setTimeout(() => {
+      pendingCloudAutosaves.delete(documentKey);
+
+      const document = vscode.workspace.textDocuments.find((item) => item.uri.toString() === documentKey);
+      if (!document || document.isClosed || !document.isDirty) {
+        return;
+      }
+
+      statusBar.showSaving();
+
+      void (async () => {
+        try {
+          const encoded = new TextEncoder().encode(document.getText());
+          await vscode.workspace.fs.writeFile(document.uri, encoded);
+
+          const saved = document.isDirty ? await document.save() : true;
+          if (!saved) {
+            outputChannel.appendLine(`[cloud] autosave skipped ${document.uri.toString()}`);
+            void refreshStatusBar(context, vscode.window.activeTextEditor?.document.uri);
+            return;
+          }
+
+          statusBar.showSaved();
+          if (cloudSavedStateTimer) {
+            clearTimeout(cloudSavedStateTimer);
+          }
+          cloudSavedStateTimer = setTimeout(() => {
+            cloudSavedStateTimer = undefined;
+            void refreshStatusBar(context, vscode.window.activeTextEditor?.document.uri);
+          }, CLOUD_SAVED_STATE_MS);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : "Unknown autosave error";
+          outputChannel.appendLine(`[cloud] autosave failed ${document.uri.toString()} ${message}`);
+          statusBar.showError();
+          void refreshStatusBar(context, vscode.window.activeTextEditor?.document.uri);
+        }
+      })();
+    }, CLOUD_AUTOSAVE_DELAY_MS);
+
+    pendingCloudAutosaves.set(documentKey, timer);
+  }));
+
+  context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((document) => {
+    const documentKey = document.uri.toString();
+    const existing = pendingCloudAutosaves.get(documentKey);
+    if (!existing) {
+      return;
+    }
+
+    clearTimeout(existing);
+    pendingCloudAutosaves.delete(documentKey);
+  }));
+
+  context.subscriptions.push(new vscode.Disposable(() => {
+    for (const timer of pendingCloudAutosaves.values()) {
+      clearTimeout(timer);
+    }
+    pendingCloudAutosaves.clear();
+
+    if (cloudSavedStateTimer) {
+      clearTimeout(cloudSavedStateTimer);
+      cloudSavedStateTimer = undefined;
+    }
+  }));
+
+  const autoSyncTimer = setInterval(() => {
+    const openProjectIds = new Set(
+      vscode.workspace.textDocuments
+        .filter((document) => document.uri.scheme === "formatex")
+        .map((document) => document.uri.authority)
+    );
+
+    void vfsProvider.syncFromRemote(openProjectIds);
+  }, 10000);
+  context.subscriptions.push(new vscode.Disposable(() => clearInterval(autoSyncTimer)));
+
+  register(context, "formatex.setApiKey", async () => {
+    await setApiKey(context);
+    clearCachedUser();
+    projectsTree.refresh();
+    await refreshStatusBar(context, vscode.window.activeTextEditor?.document.uri);
+  });
+  register(context, "formatex.clearApiKey", async () => {
+    await clearApiKey(context);
+    clearCachedUser();
+    projectsTree.refresh();
+    await refreshStatusBar(context, vscode.window.activeTextEditor?.document.uri);
+  });
   register(context, "formatex.showOutput", async () => outputChannel.show(true));
   register(context, "formatex.openLastPdf", async () => openLastPdf(context));
   register(context, "formatex.showUsage", async () => showUsage(context));
+    register(context, "formatex.showProjectActions", async (...args) => showProjectActions(context, apiClient, statusBar, outputChannel, diagnostics, projectsTree, args[0] as ProjectLike));
+    register(context, "formatex.openProject", async (...args) => openProject(context, apiClient, statusBar, args[0] as ProjectLike));
+    register(context, "formatex.openProjectLocally", async (...args) => openProjectLocally(context, apiClient, statusBar, args[0] as ProjectLike));
+    register(context, "formatex.compileCloudProject", async (...args) => compileCloudProject(context, apiClient, statusBar, outputChannel, diagnostics, args[0] as ProjectLike));
+    register(context, "formatex.openProjectInBrowser", async (...args) => openProjectInBrowser(context, apiClient, args[0] as ProjectLike));
+    register(context, "formatex.refreshProjectFiles", async (...args) => refreshProjectFiles(projectsTree, args[0] as ProjectLike));
+    register(context, "formatex.copyProjectId", async (...args) => copyProjectId(args[0] as ProjectLike));
+    register(context, "formatex.openFile", async (...args) => openFile(context, apiClient, args[0] as ProjectLike));
+    register(context, "formatex.renameFile", async (...args) => renameFile(context, apiClient, projectsTree, args[0] as ProjectLike));
+    register(context, "formatex.deleteFile", async (...args) => deleteFile(context, apiClient, projectsTree, args[0] as ProjectLike));
   register(context, "formatex.compileCurrent", async (...args) => compileCurrent(context, args[0] as vscode.Uri | undefined));
   register(context, "formatex.compileResource", async (...args) => compileResource(context, args[0] as vscode.Uri | undefined));
   register(context, "formatex.compileProject", async (...args) => compileProject(context, args[0] as vscode.Uri | undefined));
   register(context, "formatex.checkSyntax", async (...args) => checkSyntax(context, args[0] as vscode.Uri | undefined));
+
+  void refreshStatusBar(context, vscode.window.activeTextEditor?.document.uri);
 }
 
 export function deactivate(): void {
   diagnostics?.dispose();
-  statusBarItem?.dispose();
+  statusBar?.dispose();
   outputChannel?.dispose();
 }
 
@@ -47,7 +201,27 @@ function register(
   command: string,
   handler: (...args: unknown[]) => Promise<void>
 ): void {
-  context.subscriptions.push(vscode.commands.registerCommand(command, (...args) => handler(...args)));
+  context.subscriptions.push(vscode.commands.registerCommand(command, async (...args) => {
+    try {
+      await handler(...args);
+    } catch (error) {
+      if (error instanceof FormatexApiError) {
+        if (error.status === 404) {
+          vscode.window.showWarningMessage("Cloud project APIs are not available on this server yet.");
+          outputChannel.appendLine("[cloud] API endpoint not found (404). Check server version and /api/v1/projects support.");
+          return;
+        }
+
+        vscode.window.showErrorMessage(`FormaTeX request failed: ${error.message}`);
+        outputChannel.appendLine(`[error] status=${error.status} message=${error.message}`);
+        return;
+      }
+
+      const message = error instanceof Error ? error.message : "Unknown error";
+      vscode.window.showErrorMessage(`FormaTeX command failed: ${message}`);
+      outputChannel.appendLine(`[error] ${message}`);
+    }
+  }));
 }
 
 async function setApiKey(context: vscode.ExtensionContext): Promise<void> {
@@ -62,17 +236,17 @@ async function setApiKey(context: vscode.ExtensionContext): Promise<void> {
     return;
   }
 
-  await context.secrets.store(SECRET_API_KEY, apiKey.trim());
+  await context.secrets.store("formatex.apiKey", apiKey.trim());
   vscode.window.showInformationMessage("FormaTeX API key saved.");
 }
 
 async function clearApiKey(context: vscode.ExtensionContext): Promise<void> {
-  await context.secrets.delete(SECRET_API_KEY);
+  await context.secrets.delete("formatex.apiKey");
   vscode.window.showInformationMessage("FormaTeX API key cleared.");
 }
 
 async function getApiKey(context: vscode.ExtensionContext): Promise<string | null> {
-  const apiKey = await context.secrets.get(SECRET_API_KEY);
+  const apiKey = await context.secrets.get("formatex.apiKey");
   if (apiKey) {
     return apiKey;
   }
@@ -84,11 +258,46 @@ async function getApiKey(context: vscode.ExtensionContext): Promise<string | nul
 
   if (choice === "Set API Key") {
     await setApiKey(context);
-    const refreshed = await context.secrets.get(SECRET_API_KEY);
+    const refreshed = await context.secrets.get("formatex.apiKey");
     return refreshed ?? null;
   }
 
   return null;
+}
+
+async function refreshStatusBar(context: vscode.ExtensionContext, activeUri?: vscode.Uri): Promise<void> {
+  const apiKey = await context.secrets.get("formatex.apiKey");
+  if (!apiKey) {
+    statusBar.showDisconnected();
+    return;
+  }
+
+  const client = apiClient ?? new FormatexApiClient(getSettings());
+  const user = await getCachedUser(context, client);
+
+  if (activeUri?.scheme === "formatex") {
+    try {
+      const project = await client.getProject(activeUri.authority, apiKey);
+      statusBar.showProject(project.data);
+      return;
+    } catch {
+      // Fall back to ready state when the project cannot be fetched.
+    }
+  }
+
+  statusBar.showReady(user?.plan);
+}
+
+async function copyProjectId(node: unknown): Promise<void> {
+  const candidate = node as { project?: { id: string } } | { id: string } | undefined;
+  const projectId = candidate && "project" in candidate ? candidate.project?.id : candidate && "id" in candidate ? candidate.id : undefined;
+
+  if (!projectId) {
+    return;
+  }
+
+  await vscode.env.clipboard.writeText(projectId);
+  vscode.window.showInformationMessage("FormaTeX project ID copied.");
 }
 
 function logHeaders(headers: FormatexHeaders): void {
@@ -111,8 +320,13 @@ function normalizeEngine(engine: Engine): "pdflatex" | "xelatex" | "lualatex" | 
 
 async function compileCurrent(context: vscode.ExtensionContext, uri?: vscode.Uri): Promise<void> {
   const targetUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-  if (!targetUri || path.extname(targetUri.fsPath).toLowerCase() !== ".tex") {
+  if (!targetUri || path.extname(targetUri.path).toLowerCase() !== ".tex") {
     vscode.window.showErrorMessage("Open a .tex file first.");
+    return;
+  }
+
+  if (targetUri.scheme === "formatex") {
+    await compileCloudProject(context, apiClient, statusBar, outputChannel, diagnostics, targetUri.authority);
     return;
   }
 
@@ -124,6 +338,12 @@ async function compileResource(context: vscode.ExtensionContext, uri?: vscode.Ur
     vscode.window.showErrorMessage("Select a .tex file from Explorer.");
     return;
   }
+
+  if (uri.scheme === "formatex") {
+    await compileCloudProject(context, apiClient, statusBar, outputChannel, diagnostics, uri.authority);
+    return;
+  }
+
   await runCompileForUri(context, uri, false);
 }
 
@@ -134,12 +354,17 @@ async function compileProject(context: vscode.ExtensionContext, uri?: vscode.Uri
     return;
   }
 
+  if (targetUri.scheme === "formatex") {
+    await compileCloudProject(context, apiClient, statusBar, outputChannel, diagnostics, targetUri.authority);
+    return;
+  }
+
   await runCompileForUri(context, targetUri, true);
 }
 
 async function checkSyntax(context: vscode.ExtensionContext, uri?: vscode.Uri): Promise<void> {
   const targetUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-  if (!targetUri || path.extname(targetUri.fsPath).toLowerCase() !== ".tex") {
+  if (!targetUri || path.extname(targetUri.path).toLowerCase() !== ".tex") {
     vscode.window.showErrorMessage("Open a .tex file first.");
     return;
   }
@@ -150,15 +375,13 @@ async function checkSyntax(context: vscode.ExtensionContext, uri?: vscode.Uri): 
   }
 
   const settings = getSettings();
-  const client = new FormatexApiClient(settings);
-  const latex = await fs.readFile(targetUri.fsPath, "utf8");
+  const client = apiClient ?? new FormatexApiClient(settings);
+  const latex = targetUri.scheme === "formatex" ? (await vscode.workspace.openTextDocument(targetUri)).getText() : await fs.readFile(targetUri.fsPath, "utf8");
 
   const request: CompileRequest = {
     latex,
     engine: normalizeEngine(settings.defaultEngine)
   };
-
-  setStatus("Checking", "$(search-view-icon) FormaTeX: Checking");
 
   try {
     const result = await client.checkSyntax(request, apiKey);
@@ -175,8 +398,6 @@ async function checkSyntax(context: vscode.ExtensionContext, uri?: vscode.Uri): 
     }
   } catch (error) {
     await handleApiError(error, context);
-  } finally {
-    setStatus("Ready", "FormaTeX: Ready");
   }
 }
 
@@ -187,7 +408,12 @@ async function runCompileForUri(context: vscode.ExtensionContext, targetUri: vsc
   }
 
   const settings = getSettings();
-  const client = new FormatexApiClient(settings);
+  const client = apiClient ?? new FormatexApiClient(settings);
+
+  if (targetUri.scheme === "formatex") {
+    await compileCloudProject(context, client, statusBar, outputChannel, diagnostics, targetUri.authority);
+    return;
+  }
 
   let compileRequest: CompileRequest;
   let payloadBytes = 0;
@@ -221,7 +447,7 @@ async function runCompileForUri(context: vscode.ExtensionContext, targetUri: vsc
     };
   }
 
-  setStatus("Compiling", "$(sync~spin) FormaTeX: Compiling");
+  statusBar.showBusy();
   outputChannel.appendLine(`[compile] started file=${mainFilePath}`);
 
   try {
@@ -235,7 +461,7 @@ async function runCompileForUri(context: vscode.ExtensionContext, targetUri: vsc
   } catch (error) {
     await handleApiError(error, context);
   } finally {
-    setStatus("Ready", "FormaTeX: Ready");
+    void refreshStatusBar(context, vscode.window.activeTextEditor?.document.uri);
   }
 }
 
@@ -360,7 +586,7 @@ async function showUsage(context: vscode.ExtensionContext): Promise<void> {
   }
 
   const settings = getSettings();
-  const client = new FormatexApiClient(settings);
+  const client = apiClient ?? new FormatexApiClient(settings);
 
   try {
     const usage = await client.getUsage(apiKey);
@@ -385,14 +611,10 @@ function isCompileSuccess(response: CompileResponse): response is CompileRespons
   return response.success === true;
 }
 
-function setStatus(label: string, text: string): void {
-  statusBarItem.tooltip = `FormaTeX: ${label}`;
-  statusBarItem.text = text;
-}
-
 async function handleApiError(error: unknown, context: vscode.ExtensionContext): Promise<void> {
   if (error instanceof FormatexApiError) {
     const retryAfter = error.headers.retryAfter;
+    statusBar.showError();
 
     if (error.status === 401) {
       const choice = await vscode.window.showErrorMessage("FormaTeX authentication failed.", "Set API Key", "Show Logs");
@@ -425,6 +647,7 @@ async function handleApiError(error: unknown, context: vscode.ExtensionContext):
   const message = error instanceof Error ? error.message : "Unknown error";
   vscode.window.showErrorMessage(`FormaTeX error: ${message}`);
   outputChannel.appendLine(`[error] ${message}`);
+  statusBar.showError();
 }
 
 function stringifyErrorDetails(details: unknown): string {

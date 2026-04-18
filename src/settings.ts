@@ -1,11 +1,17 @@
 import * as vscode from "vscode";
 import { Engine } from "./types";
 
+export type FormatexOpenMode = "vfs" | "local";
+
 export interface FormatexSettings {
   apiBaseUrl: string;
   defaultEngine: Engine;
   outputDir: string;
   mainFile: string;
+  openMode: FormatexOpenMode;
+  autoSyncOnSave: boolean;
+  showProjectsPanel: boolean;
+  localWorkspaceDir: string;
   autoOpenPdf: boolean;
   openRemoteResult: boolean;
   enableAsyncFallback: boolean;
@@ -23,6 +29,10 @@ export function getSettings(): FormatexSettings {
     defaultEngine: config.get<Engine>("defaultEngine", "auto"),
     outputDir: config.get<string>("outputDir", ".formatex/output"),
     mainFile: config.get<string>("mainFile", ""),
+    openMode: config.get<FormatexOpenMode>("openMode", "vfs"),
+    autoSyncOnSave: config.get<boolean>("autoSyncOnSave", true),
+    showProjectsPanel: config.get<boolean>("showProjectsPanel", true),
+    localWorkspaceDir: config.get<string>("localWorkspaceDir", ""),
     autoOpenPdf: config.get<boolean>("autoOpenPdf", true),
     openRemoteResult: config.get<boolean>("openRemoteResult", false),
     enableAsyncFallback: config.get<boolean>("enableAsyncFallback", true),

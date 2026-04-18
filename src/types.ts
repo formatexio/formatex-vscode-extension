@@ -61,6 +61,28 @@ export interface UsageResponse {
   plan?: string;
 }
 
+export interface Project {
+  id: string;
+  name: string;
+  mainFile: string;
+  fileCount: number;
+  updatedAt: string;
+  createdAt: string;
+}
+
+export interface ProjectFile {
+  path: string;
+  size: number;
+  updatedAt: string;
+  mimeType: string;
+}
+
+export interface UserInfo {
+  name: string;
+  email: string;
+  plan: string;
+}
+
 export interface FormatexHeaders {
   plan?: string;
   used?: string;
