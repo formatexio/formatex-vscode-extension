@@ -14,8 +14,12 @@ export default [
         AbortController: "readonly",
         Buffer: "readonly",
         Headers: "readonly",
+        TextEncoder: "readonly",
+        URLSearchParams: "readonly",
+        clearInterval: "readonly",
         clearTimeout: "readonly",
         fetch: "readonly",
+        setInterval: "readonly",
         setTimeout: "readonly"
       }
     },
@@ -24,7 +28,9 @@ export default [
     },
     rules: {
       ...tsPlugin.configs.recommended.rules,
-      "@typescript-eslint/no-explicit-any": "error"
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
+      "no-undef": "off"
     }
   }
 ];

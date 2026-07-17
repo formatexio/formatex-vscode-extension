@@ -1,4 +1,6 @@
-export type Engine = "auto" | "pdflatex" | "xelatex" | "lualatex";
+export type Engine = "auto" | "pdflatex" | "xelatex" | "lualatex" | "latexmk";
+
+export type ForcedEngine = Exclude<Engine, "auto">;
 
 export interface FileUpload {
   path: string;
@@ -7,7 +9,7 @@ export interface FileUpload {
 
 export interface CompileRequest {
   latex: string;
-  engine?: Engine | "pdflatex" | "xelatex" | "lualatex";
+  engine?: ForcedEngine;
   timeout?: number;
   files?: FileUpload[];
 }

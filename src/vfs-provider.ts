@@ -23,7 +23,7 @@ function isTextExtension(filePath: string): boolean {
   return new Set([".tex", ".bib", ".sty", ".cls", ".bst", ".txt", ".md", ".json", ".yml", ".yaml", ".svg", ".xml", ".html", ".htm", ".css", ".js", ".ts", ".mjs", ".cjs"]).has(extension);
 }
 
-function inferMimeType(filePath: string, existing?: string): string {
+export function inferMimeType(filePath: string, existing?: string): string {
   if (existing) {
     return existing;
   }
@@ -172,6 +172,17 @@ export class FormatexFileSystemProvider implements vscode.FileSystemProvider {
     }
 
     const apiKey = await this.getApiKeyOrThrow();
+
+    if (existing) {
+      const resolution = await this.resolveRemoteConflict(uri, projectId, filePath, existing, apiKey);
+      if (resolution === "reload") {
+        throw vscode.FileSystemError.NoPermissions("FormaTeX: reloaded remote version, local edit discarded.");
+      }
+      if (resolution === "cancel") {
+        throw vscode.FileSystemError.NoPermissions("FormaTeX: write cancelled due to a remote conflict.");
+      }
+    }
+
     const mimeType = inferMimeType(filePath, existing?.mimeType);
     await this.client.writeFile(projectId, filePath, content, mimeType, apiKey);
 
@@ -339,6 +350,53 @@ export class FormatexFileSystemProvider implements vscode.FileSystemProvider {
         // Best-effort background sync; ignore transient polling failures.
       }
     }
+  }
+
+  /**
+   * Compares the file's cached metadata against a fresh server read (bypassing
+   * projectCache, which may be stale between poll cycles) to catch edits made
+   * elsewhere (dashboard, another client) since we last synced this file.
+   */
+  private async resolveRemoteConflict(
+    uri: vscode.Uri,
+    projectId: string,
+    filePath: string,
+    cachedEntry: ProjectFile,
+    apiKey: string
+  ): Promise<"overwrite" | "reload" | "cancel"> {
+    let remoteEntry: ProjectFile | undefined;
+    try {
+      const response = await this.client.listFiles(projectId, apiKey);
+      remoteEntry = response.data.files.find((item) => item.path === filePath);
+    } catch {
+      return "overwrite";
+    }
+
+    const hasConflict = !!remoteEntry && (remoteEntry.updatedAt !== cachedEntry.updatedAt || remoteEntry.size !== cachedEntry.size);
+    if (!hasConflict) {
+      return "overwrite";
+    }
+
+    const choice = await vscode.window.showWarningMessage(
+      `"${filePath}" changed on the FormaTeX server since you last synced it here.`,
+      { modal: true },
+      "Overwrite Remote",
+      "Reload from Server"
+    );
+
+    if (choice === "Reload from Server") {
+      this.removeContent(projectId, filePath);
+      this.projectCache.delete(projectId);
+      this.onDidChangeFileEmitter.fire([{ type: vscode.FileChangeType.Changed, uri }]);
+      this.onProjectChanged(projectId);
+      return "reload";
+    }
+
+    if (choice === "Overwrite Remote") {
+      return "overwrite";
+    }
+
+    return "cancel";
   }
 
   private async getApiKeyOrThrow(): Promise<string> {

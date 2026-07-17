@@ -48,6 +48,38 @@ function normalizeRef(input: string): string[] {
   return chunks;
 }
 
+// Conventional asset folder names to check when a reference has no directory
+// component and doesn't resolve next to the referencing file - e.g.
+// \includegraphics{logo.png} where the real file is in ./assets/logo.png.
+// Bounded to one level under the referencing file's own directory, not a
+// recursive search, so it can't accidentally sweep in unrelated files.
+const ASSET_SUBDIRS = ["assets", "img", "images", "figures", "graphics"];
+const ASSET_EXTENSIONS = [".png", ".jpg", ".jpeg", ".pdf", ".eps", ".svg"];
+
+async function resolveInAssetSubdirs(baseDir: string, clean: string): Promise<string | null> {
+  if (clean.includes("/") || clean.includes(path.sep)) {
+    return null;
+  }
+
+  for (const subdir of ASSET_SUBDIRS) {
+    const candidate = path.resolve(baseDir, subdir, clean);
+    if (await exists(candidate)) {
+      return candidate;
+    }
+
+    if (!path.extname(clean)) {
+      for (const candidateExt of ASSET_EXTENSIONS) {
+        const withExt = `${candidate}${candidateExt}`;
+        if (await exists(withExt)) {
+          return withExt;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 async function resolveCandidate(baseDir: string, ref: string): Promise<string | null> {
   const clean = ref.replace(/^\.\//, "");
   const explicit = path.resolve(baseDir, clean);
@@ -65,7 +97,7 @@ async function resolveCandidate(baseDir: string, ref: string): Promise<string | 
     }
   }
 
-  return null;
+  return resolveInAssetSubdirs(baseDir, clean);
 }
 
 function parseReferences(content: string): string[] {
@@ -104,14 +136,10 @@ export async function resolveMainTex(
   return activeFile;
 }
 
-export async function collectProjectFiles(
-  workspaceRoot: string,
-  mainTexFile: string
-): Promise<{ latex: string; files: FileUpload[]; payloadBytes: number }> {
+async function walkProjectFiles(mainTexFile: string): Promise<string[]> {
   const visited = new Set<string>();
   const queued = [mainTexFile];
-  const apiFiles: FileUpload[] = [];
-  let payloadBytes = 0;
+  const collected: string[] = [];
 
   while (queued.length > 0) {
     const current = queued.shift();
@@ -125,17 +153,13 @@ export async function collectProjectFiles(
       continue;
     }
 
-    const raw = await fs.readFile(current);
-    const encoded = raw.toString("base64");
-    apiFiles.push({ path: normalizeForApi(workspaceRoot, current), data: encoded });
-    payloadBytes += raw.byteLength;
-
-    if (apiFiles.length >= MAX_FILES) {
+    collected.push(current);
+    if (collected.length >= MAX_FILES) {
       break;
     }
 
     if (ext === ".tex") {
-      const content = raw.toString("utf8");
+      const content = await readUtf8(current);
       const refs = parseReferences(content);
       for (const ref of refs) {
         const resolved = await resolveCandidate(path.dirname(current), ref);
@@ -146,8 +170,52 @@ export async function collectProjectFiles(
     }
   }
 
+  return collected;
+}
+
+export async function collectProjectFiles(
+  workspaceRoot: string,
+  mainTexFile: string
+): Promise<{ latex: string; files: FileUpload[]; payloadBytes: number }> {
+  const filePaths = await walkProjectFiles(mainTexFile);
+  const apiFiles: FileUpload[] = [];
+  let payloadBytes = 0;
+
+  for (const filePath of filePaths) {
+    const raw = await fs.readFile(filePath);
+    apiFiles.push({ path: normalizeForApi(workspaceRoot, filePath), data: raw.toString("base64") });
+    payloadBytes += raw.byteLength;
+  }
+
   const latex = await readUtf8(mainTexFile);
   return { latex, files: apiFiles.filter((x) => x.path !== normalizeForApi(workspaceRoot, mainTexFile)), payloadBytes };
+}
+
+function commonAncestorDir(filePaths: string[]): string {
+  const dirs = filePaths.map((filePath) => path.dirname(filePath).split(path.sep));
+  let common = dirs[0] ?? [];
+
+  for (const segments of dirs.slice(1)) {
+    let i = 0;
+    while (i < common.length && i < segments.length && common[i] === segments[i]) {
+      i++;
+    }
+    common = common.slice(0, i);
+  }
+
+  return common.join(path.sep) || path.sep;
+}
+
+/**
+ * Detects the smallest project root for a standalone .tex file by walking its
+ * \input/\include/\bibliography/\includegraphics references (same graph as
+ * collectProjectFiles) and taking the common ancestor directory of everything
+ * found, instead of assuming the whole workspace/repo is the project.
+ */
+export async function detectStandaloneProject(mainTexFile: string): Promise<{ root: string; files: string[] }> {
+  const files = await walkProjectFiles(mainTexFile);
+  const root = commonAncestorDir(files.length > 0 ? files : [mainTexFile]);
+  return { root, files };
 }
 
 export function getWorkspaceFolderForUri(uri: vscode.Uri): vscode.WorkspaceFolder | undefined {

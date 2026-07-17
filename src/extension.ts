@@ -6,6 +6,7 @@ import { clearCachedUser, getCachedUser } from "./auth";
 import { publishDiagnostics } from "./diagnostics";
 import {
   compileCloudProject,
+  createProjectFromFolder,
   deleteFile,
   openFile,
   openProject,
@@ -22,6 +23,7 @@ import { getSettings } from "./settings";
 import { FormatexStatusBar } from "./status-bar";
 import { FormatexFileSystemProvider } from "./vfs-provider";
 import { FormatexUriHandler } from "./uri-handler";
+import { openPdfBeside } from "./pdf-preview";
 import { CompileRequest, CompileResponse, DiagnosticPayload, Engine, FormatexHeaders } from "./types";
 
 const LAST_PDF_PATH_KEY = "formatex.lastPdfPath";
@@ -182,10 +184,12 @@ export function activate(context: vscode.ExtensionContext): void {
     register(context, "formatex.openFile", async (...args) => openFile(context, apiClient, args[0] as ProjectLike));
     register(context, "formatex.renameFile", async (...args) => renameFile(context, apiClient, projectsTree, args[0] as ProjectLike));
     register(context, "formatex.deleteFile", async (...args) => deleteFile(context, apiClient, projectsTree, args[0] as ProjectLike));
+    register(context, "formatex.createProjectFromFolder", async (...args) => createProjectFromFolder(context, apiClient, statusBar, projectsTree, args[0] as vscode.Uri | undefined));
   register(context, "formatex.compileCurrent", async (...args) => compileCurrent(context, args[0] as vscode.Uri | undefined));
   register(context, "formatex.compileResource", async (...args) => compileResource(context, args[0] as vscode.Uri | undefined));
   register(context, "formatex.compileProject", async (...args) => compileProject(context, args[0] as vscode.Uri | undefined));
   register(context, "formatex.checkSyntax", async (...args) => checkSyntax(context, args[0] as vscode.Uri | undefined));
+  register(context, "formatex.selectEngine", async () => selectEngine(context));
 
   void refreshStatusBar(context, vscode.window.activeTextEditor?.document.uri);
 }
@@ -285,7 +289,7 @@ async function refreshStatusBar(context: vscode.ExtensionContext, activeUri?: vs
     }
   }
 
-  statusBar.showReady(user?.plan);
+  statusBar.showReady(user?.plan, getSettings().defaultEngine);
 }
 
 async function copyProjectId(node: unknown): Promise<void> {
@@ -311,11 +315,40 @@ function logHeaders(headers: FormatexHeaders): void {
   }
 }
 
-function normalizeEngine(engine: Engine): "pdflatex" | "xelatex" | "lualatex" | undefined {
+function normalizeEngine(engine: Engine): "pdflatex" | "xelatex" | "lualatex" | "latexmk" | undefined {
   if (engine === "auto") {
     return undefined;
   }
   return engine;
+}
+
+const ENGINE_CHOICES: { label: string; description: string; value: Engine }[] = [
+  { label: "$(sparkle) Auto", description: "Let FormaTeX detect the right engine and apply automatic fixes (compile/smart)", value: "auto" },
+  { label: "pdflatex", description: "Standard LaTeX engine", value: "pdflatex" },
+  { label: "xelatex", description: "Unicode and modern font support", value: "xelatex" },
+  { label: "lualatex", description: "Unicode and modern font support via LuaTeX", value: "lualatex" },
+  { label: "latexmk", description: "Best for complex documents needing multiple passes/bibliography", value: "latexmk" }
+];
+
+async function selectEngine(context: vscode.ExtensionContext): Promise<void> {
+  const current = getSettings().defaultEngine;
+  const choice = await vscode.window.showQuickPick(
+    ENGINE_CHOICES.map((option) => ({
+      ...option,
+      label: option.value === current ? `${option.label} $(check)` : option.label
+    })),
+    { title: "FormaTeX Compile Engine", placeHolder: `Current: ${current}` }
+  );
+
+  if (!choice) {
+    return;
+  }
+
+  const config = vscode.workspace.getConfiguration("formatex");
+  const target = vscode.workspace.workspaceFolders?.length ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+  await config.update("defaultEngine", choice.value, target);
+  vscode.window.showInformationMessage(`FormaTeX: compile engine set to "${choice.value}".`);
+  await refreshStatusBar(context, vscode.window.activeTextEditor?.document.uri);
 }
 
 async function compileCurrent(context: vscode.ExtensionContext, uri?: vscode.Uri): Promise<void> {
@@ -378,10 +411,7 @@ async function checkSyntax(context: vscode.ExtensionContext, uri?: vscode.Uri): 
   const client = apiClient ?? new FormatexApiClient(settings);
   const latex = targetUri.scheme === "formatex" ? (await vscode.workspace.openTextDocument(targetUri)).getText() : await fs.readFile(targetUri.fsPath, "utf8");
 
-  const request: CompileRequest = {
-    latex,
-    engine: normalizeEngine(settings.defaultEngine)
-  };
+  const request: CompileRequest = { latex };
 
   try {
     const result = await client.checkSyntax(request, apiKey);
@@ -447,7 +477,7 @@ async function runCompileForUri(context: vscode.ExtensionContext, targetUri: vsc
     };
   }
 
-  statusBar.showBusy();
+  statusBar.showBusy(settings.defaultEngine);
   outputChannel.appendLine(`[compile] started file=${mainFilePath}`);
 
   try {
@@ -472,7 +502,11 @@ async function runSyncCompile(
   request: CompileRequest,
   mainFilePath: string
 ): Promise<void> {
-  const response = await client.compileSmart(request, apiKey);
+  // compile/smart auto-detects the engine and ignores an `engine` field entirely,
+  // so a forced (non-auto) engine choice must go through the plain compile endpoint instead.
+  const response = request.engine
+    ? await client.compileSync(request, apiKey)
+    : await client.compileSmart(request, apiKey);
   logHeaders(response.headers);
 
   const diagnosticsPayload = getDiagnosticsPayload(response.data);
@@ -543,10 +577,11 @@ async function persistAndOpenResult(
     await context.globalState.update(LAST_REMOTE_URL_KEY, remoteUrl);
   }
 
-  vscode.window.showInformationMessage("FormaTeX compile succeeded.", "Open PDF", "Show Logs", "Open Remote").then(
+  const notificationActions = [...(settings.autoOpenPdf ? [] : ["Open PDF"]), "Show Logs", "Open Remote"];
+  vscode.window.showInformationMessage("FormaTeX compile succeeded.", ...notificationActions).then(
     async (action) => {
       if (action === "Open PDF") {
-        await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(targetPath));
+        await openPdfBeside(targetPath);
       }
       if (action === "Show Logs") {
         outputChannel.show(true);
@@ -561,7 +596,7 @@ async function persistAndOpenResult(
   );
 
   if (settings.autoOpenPdf) {
-    await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(targetPath));
+    await openPdfBeside(targetPath);
   }
 
   if (settings.openRemoteResult && remoteUrl) {

@@ -224,6 +224,18 @@ export class FormatexApiClient {
     });
   }
 
+  public async createProject(name: string, mainFile: string, apiKey: string): Promise<ApiResponse<Project>> {
+    return this.request<Project>("/api/v1/projects", {
+      method: "POST",
+      body: JSON.stringify({ name, mainFile }),
+      timeoutMs: this.settings.requestTimeoutMs,
+      apiKey,
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+  }
+
   public async getProject(projectId: string, apiKey: string): Promise<ApiResponse<Project>> {
     return this.request<Project>(this.projectUrl(projectId), {
       timeoutMs: this.settings.requestTimeoutMs,

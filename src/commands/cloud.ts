@@ -9,6 +9,9 @@ import { FormatexSettings, getSettings } from "../settings";
 import { FormatexStatusBar } from "../status-bar";
 import { Project, CompileRequest, CompileResponse, FileUpload, DiagnosticPayload } from "../types";
 import { FormatexProjectsTree, FileNode, FolderNode, ProjectNode, TreeNode } from "../projects-tree";
+import { openPdfBeside } from "../pdf-preview";
+import { detectStandaloneProject } from "../project";
+import { inferMimeType } from "../vfs-provider";
 
 export type ProjectLike = ProjectNode | FileNode | FolderNode | Project | string | undefined;
 
@@ -28,7 +31,7 @@ function isProject(value: unknown): value is Project {
   return !!value && typeof value === "object" && "id" in value && "name" in value;
 }
 
-function normalizeEngine(engine: FormatexSettings["defaultEngine"]): "pdflatex" | "xelatex" | "lualatex" | undefined {
+function normalizeEngine(engine: FormatexSettings["defaultEngine"]): "pdflatex" | "xelatex" | "lualatex" | "latexmk" | undefined {
   return engine === "auto" ? undefined : engine;
 }
 
@@ -88,6 +91,10 @@ async function resolveProject(
 
 function toCloudUri(projectId: string, filePath: string): vscode.Uri {
   return vscode.Uri.from({ scheme: "formatex", authority: projectId, path: `/${filePath}` });
+}
+
+function toRelativePosix(root: string, filePath: string): string {
+  return path.relative(root, filePath).split(path.sep).join("/");
 }
 
 function toSafeFileName(value: string): string {
@@ -210,9 +217,15 @@ async function runAsyncCompile(
   outputChannel.appendLine(`[cloud-async] compile success saved=${targetPath}`);
   statusBar.showReady();
 
-  const action = await vscode.window.showInformationMessage("FormaTeX cloud compile succeeded.", "Open PDF", "Show Logs");
+  const settings = getSettings();
+  if (settings.autoOpenPdf) {
+    await openPdfBeside(targetPath);
+  }
+
+  const notificationActions = [...(settings.autoOpenPdf ? [] : ["Open PDF"]), "Show Logs"];
+  const action = await vscode.window.showInformationMessage("FormaTeX cloud compile succeeded.", ...notificationActions);
   if (action === "Open PDF") {
-    await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(targetPath));
+    await openPdfBeside(targetPath);
   }
 
   if (action === "Show Logs") {
@@ -242,7 +255,7 @@ async function runCloudCompile(
     engine: normalizeEngine(settings.defaultEngine)
   };
 
-  statusBar.showBusy();
+  statusBar.showBusy(settings.defaultEngine);
   outputChannel.appendLine(`[cloud] project=${project.name} files=${files.length} payloadBytes=${payloadBytes}`);
 
   try {
@@ -250,7 +263,10 @@ async function runCloudCompile(
     if (fallbackToAsync) {
       await runAsyncCompile(context, client, apiKey, request, mainUri, statusBar, outputChannel, saveName);
     } else {
-      const response = await client.compileSmart(request, apiKey);
+      // compile/smart ignores an explicit `engine`; forced engines must use the plain compile endpoint.
+      const response = request.engine
+        ? await client.compileSync(request, apiKey)
+        : await client.compileSmart(request, apiKey);
       const diagnosticsPayload = getDiagnosticsPayload(response.data);
       publishDiagnostics(diagnostics, mainUri, diagnosticsPayload);
 
@@ -267,9 +283,14 @@ async function runCloudCompile(
       outputChannel.appendLine(`[cloud] compile success saved=${targetPath}`);
       statusBar.showProject(project);
 
-      const action = await vscode.window.showInformationMessage("FormaTeX cloud compile succeeded.", "Open PDF", "Show Logs");
+      if (settings.autoOpenPdf) {
+        await openPdfBeside(targetPath);
+      }
+
+      const notificationActions = [...(settings.autoOpenPdf ? [] : ["Open PDF"]), "Show Logs"];
+      const action = await vscode.window.showInformationMessage("FormaTeX cloud compile succeeded.", ...notificationActions);
       if (action === "Open PDF") {
-        await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(targetPath));
+        await openPdfBeside(targetPath);
       }
 
       if (action === "Show Logs") {
@@ -539,5 +560,89 @@ export async function refreshProjectFiles(
 
   if (isProjectNode(projectLike as TreeNode)) {
     tree.refresh((projectLike as ProjectNode).project.id);
+  }
+}
+
+/**
+ * Turns a local .tex file into a new FormaTeX cloud project without requiring
+ * the user to zip/upload it manually. The upload set is limited to the main
+ * file's \input/\include/\bibliography/\includegraphics dependency graph, and
+ * the project root is the common ancestor directory of those files - so
+ * picking a .tex nested inside a larger repo (e.g. "repo/rapport/main.tex")
+ * only uploads the "rapport" subtree, not the whole repo.
+ */
+export async function createProjectFromFolder(
+  context: vscode.ExtensionContext,
+  client: FormatexApiClient,
+  statusBar: FormatexStatusBar,
+  tree: FormatexProjectsTree,
+  uri?: vscode.Uri
+): Promise<void> {
+  const targetUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+  if (!targetUri || targetUri.scheme !== "file" || path.extname(targetUri.fsPath).toLowerCase() !== ".tex") {
+    vscode.window.showErrorMessage("Select or open a local .tex file to create a FormaTeX project from it.");
+    return;
+  }
+
+  const apiKey = await ensureApiKey(context);
+  if (!apiKey) {
+    return;
+  }
+
+  const { root, files: detected } = await detectStandaloneProject(targetUri.fsPath);
+  const files = detected.includes(targetUri.fsPath) ? detected : [targetUri.fsPath, ...detected];
+
+  const defaultName = path.basename(root) || path.basename(targetUri.fsPath, ".tex");
+  const name = await vscode.window.showInputBox({
+    title: "FormaTeX: New Cloud Project",
+    prompt: `Create a project from ${files.length} file(s) detected under "${root}"`,
+    value: defaultName,
+    ignoreFocusOut: true
+  });
+
+  if (!name) {
+    return;
+  }
+
+  const confirm = await vscode.window.showWarningMessage(
+    `Create FormaTeX project "${name}" from ${files.length} file(s) under "${root}"? Only files reachable from ${path.basename(targetUri.fsPath)} are uploaded, not the whole workspace.`,
+    { modal: true },
+    "Create Project"
+  );
+
+  if (confirm !== "Create Project") {
+    return;
+  }
+
+  const mainFileRelative = toRelativePosix(root, targetUri.fsPath);
+
+  const project = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `Creating FormaTeX project "${name}"` },
+    async (progress): Promise<Project> => {
+      const created = (await client.createProject(name, mainFileRelative, apiKey)).data;
+
+      for (let i = 0; i < files.length; i++) {
+        const relative = toRelativePosix(root, files[i]);
+        const bytes = await fs.readFile(files[i]);
+        await client.writeFile(created.id, relative, bytes, inferMimeType(relative), apiKey);
+        progress.report({ message: `${i + 1}/${files.length} files`, increment: 100 / files.length });
+      }
+
+      return created;
+    }
+  );
+
+  tree.refresh();
+  const action = await vscode.window.showInformationMessage(
+    `FormaTeX project "${name}" created with ${files.length} file(s).`,
+    "Open Project",
+    "Open in Browser"
+  );
+
+  if (action === "Open Project") {
+    await openProject(context, client, statusBar, project);
+  }
+  if (action === "Open in Browser") {
+    await openProjectInBrowser(context, client, project);
   }
 }

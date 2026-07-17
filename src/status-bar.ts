@@ -21,9 +21,10 @@ export class FormatexStatusBar {
     this.item.show();
   }
 
-  public showReady(plan?: string): void {
-    this.item.text = plan ? `FormaTeX: Ready [${plan}]` : "FormaTeX: Ready";
-    this.item.tooltip = "Show FormaTeX output";
+  public showReady(plan?: string, engine?: string): void {
+    const engineSuffix = engine ? ` ($(settings-gear) ${engine})` : "";
+    this.item.text = plan ? `FormaTeX: Ready [${plan}]${engineSuffix}` : `FormaTeX: Ready${engineSuffix}`;
+    this.item.tooltip = engine ? `Compile engine: ${engine}. Click to show FormaTeX output.` : "Show FormaTeX output";
     this.item.command = "formatex.showOutput";
     this.item.show();
   }
@@ -39,8 +40,8 @@ export class FormatexStatusBar {
     this.item.show();
   }
 
-  public showBusy(): void {
-    this.item.text = "$(sync~spin) FormaTeX: Compiling...";
+  public showBusy(engine?: string): void {
+    this.item.text = engine ? `$(sync~spin) FormaTeX: Compiling (${engine})...` : "$(sync~spin) FormaTeX: Compiling...";
     this.item.tooltip = "FormaTeX is compiling";
     this.item.command = "formatex.showOutput";
     this.item.show();
