@@ -458,7 +458,7 @@ async function runCompileForUri(context: vscode.ExtensionContext, targetUri: vsc
 
     const mainTex = await resolveMainTex(folder.uri.fsPath, targetUri.fsPath, settings.mainFile);
     mainFilePath = mainTex;
-    const projectData = await collectProjectFiles(folder.uri.fsPath, mainTex);
+    const projectData = await collectProjectFiles(mainTex);
 
     compileRequest = {
       latex: projectData.latex,
