@@ -174,21 +174,25 @@ async function walkProjectFiles(mainTexFile: string): Promise<string[]> {
 }
 
 export async function collectProjectFiles(
-  workspaceRoot: string,
   mainTexFile: string
 ): Promise<{ latex: string; files: FileUpload[]; payloadBytes: number }> {
+  // Paths sent to the API are unpacked relative to the main file's own
+  // location (that's where \input/\include references in its content
+  // resolve from), not the VS Code workspace folder — those can differ
+  // when the opened workspace is an ancestor of the actual project dir.
+  const projectRoot = path.dirname(mainTexFile);
   const filePaths = await walkProjectFiles(mainTexFile);
   const apiFiles: FileUpload[] = [];
   let payloadBytes = 0;
 
   for (const filePath of filePaths) {
     const raw = await fs.readFile(filePath);
-    apiFiles.push({ path: normalizeForApi(workspaceRoot, filePath), data: raw.toString("base64") });
+    apiFiles.push({ path: normalizeForApi(projectRoot, filePath), data: raw.toString("base64") });
     payloadBytes += raw.byteLength;
   }
 
   const latex = await readUtf8(mainTexFile);
-  return { latex, files: apiFiles.filter((x) => x.path !== normalizeForApi(workspaceRoot, mainTexFile)), payloadBytes };
+  return { latex, files: apiFiles.filter((x) => x.path !== normalizeForApi(projectRoot, mainTexFile)), payloadBytes };
 }
 
 function commonAncestorDir(filePaths: string[]): string {
