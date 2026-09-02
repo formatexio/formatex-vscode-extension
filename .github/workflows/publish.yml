@@ -43,6 +43,12 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: npx @vscode/vsce publish patch -p "$VSCE_PAT"
 
+      # vsce's `npm version patch` step above only commits+tags locally;
+      # it never pushes, so without this the bump is discarded when the
+      # runner exits and every future run re-tries the same version.
+      - name: Push version bump
+        run: git push origin HEAD:main --follow-tags
+
   publish-on-release-or-manual:
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -77,3 +83,9 @@ jobs:
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: npx @vscode/vsce publish patch -p "$VSCE_PAT"
+
+      # vsce's `npm version patch` step above only commits+tags locally;
+      # it never pushes, so without this the bump is discarded when the
+      # runner exits and every future run re-tries the same version.
+      - name: Push version bump
+        run: git push origin HEAD:main --follow-tags
