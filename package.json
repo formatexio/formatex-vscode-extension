@@ -3,7 +3,7 @@
   "displayName": "FormaTeX",
   "description": "Compile LaTeX with FormaTeX directly from VS Code.",
   "icon": "media/icon.png",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "formatex-io",
   "license": "MIT",
   "engines": {
