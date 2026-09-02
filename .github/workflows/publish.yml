@@ -12,7 +12,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Checkout
@@ -33,27 +33,38 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Configure Git identity
+      # main requires a reviewed PR for every change, so the workflow can't
+      # commit/push a version bump back to the repo (that's the point of
+      # the branch protection). Instead of touching git at all, ask the
+      # Marketplace what's actually live and publish current+1 explicitly.
+      # package.json on main is informational only and may lag — harmless.
+      - name: Determine next version
+        id: next_version
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          CURRENT=$(curl -sf -X POST "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json;api-version=3.0-preview.1" \
+            -d '{"filters":[{"criteria":[{"filterType":7,"value":"formatex-io.formatex"}]}],"flags":914}' \
+            | jq -r '.results[0].extensions[0].versions[0].version')
+          if [ -z "$CURRENT" ] || [ "$CURRENT" = "null" ]; then
+            echo "::error::Could not determine current Marketplace version"
+            exit 1
+          fi
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "Current Marketplace version: $CURRENT -> publishing $NEXT"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
 
-      - name: Publish patch to Marketplace
+      - name: Publish to Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx @vscode/vsce publish patch -p "$VSCE_PAT"
-
-      # vsce's `npm version patch` step above only commits+tags locally;
-      # it never pushes, so without this the bump is discarded when the
-      # runner exits and every future run re-tries the same version.
-      - name: Push version bump
-        run: git push origin HEAD:main --follow-tags
+        run: npx @vscode/vsce publish "${{ steps.next_version.outputs.next }}" --no-git-tag-version -p "$VSCE_PAT"
 
   publish-on-release-or-manual:
     if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Checkout
@@ -74,18 +85,24 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Configure Git identity
+      - name: Determine next version
+        id: next_version
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          CURRENT=$(curl -sf -X POST "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json;api-version=3.0-preview.1" \
+            -d '{"filters":[{"criteria":[{"filterType":7,"value":"formatex-io.formatex"}]}],"flags":914}' \
+            | jq -r '.results[0].extensions[0].versions[0].version')
+          if [ -z "$CURRENT" ] || [ "$CURRENT" = "null" ]; then
+            echo "::error::Could not determine current Marketplace version"
+            exit 1
+          fi
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "Current Marketplace version: $CURRENT -> publishing $NEXT"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
 
-      - name: Publish patch to Marketplace
+      - name: Publish to Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx @vscode/vsce publish patch -p "$VSCE_PAT"
-
-      # vsce's `npm version patch` step above only commits+tags locally;
-      # it never pushes, so without this the bump is discarded when the
-      # runner exits and every future run re-tries the same version.
-      - name: Push version bump
-        run: git push origin HEAD:main --follow-tags
+        run: npx @vscode/vsce publish "${{ steps.next_version.outputs.next }}" --no-git-tag-version -p "$VSCE_PAT"
